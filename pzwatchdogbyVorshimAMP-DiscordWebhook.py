@@ -133,28 +133,28 @@ def discord_message_sync(text, is_log=False):
     
     if DISCORD_LOGSWEBHOOK_URL:
         resp = requests.post(DISCORD_LOGSWEBHOOK_URL, json=data)
-        if resp.status_code == 204:
-            log_print("[DISCORD] Messaggio di log inviato con successo.")
-        else:
+        if not resp.status_code == 204:
             log_print(f"[DISCORD] Errore nell'invio del log, status={resp.status_code}, resp={resp.text}")
 
     if is_log and DISCORD_WEBHOOK_URL:
         resp = requests.post(DISCORD_WEBHOOK_URL, json=data)
-        if resp.status_code == 204:
-            log_print("[DISCORD] Messaggio inviato con successo.")
-        else:
+        if not resp.status_code == 204:
             log_print(f"[DISCORD] Errore nell'invio, status={resp.status_code}, resp={resp.text}")
 
-def tail_f(log_file):
-    """Legge in stile 'tail -f': parte dalla fine e yield-a ogni nuova riga."""
-    with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
-        f.seek(0, os.SEEK_END)
-        while True:
-            line = f.readline()
-            if not line:
-                time.sleep(1.0)
-                continue
-            yield line
+def tail_f(log_file, timeout=1.0):
+    """Legge in stile 'tail -f': parte dalla fine e yield-a ogni nuova riga con timeout."""
+    try:
+        with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+            f.seek(0, os.SEEK_END)
+            while True:
+                line = f.readline()
+                if line:
+                    yield line
+                else:
+                    time.sleep(timeout)
+                    yield None
+    except Exception as e:
+        log_print(f"[ERROR] Errore nella funzione tail_f: {e}")
 
 def get_players(rcon_client):
     """Restituisce il numero di giocatori connessi, estraendo dalla risposta di 'players'."""
@@ -240,11 +240,13 @@ def handle_mods_update():
             while minutes_left > 0:
                 msg = f"RIAVVIO tra {minutes_left} minuti!"
                 broadcast_message(rcon, msg)
-                discord_message_sync(msg)
-                log_print(f"[INFO] Avviso countdown: {minutes_left} minuti...", is_log=True)
+                discord_message_sync(msg, is_log=True)
+                log_print(f"[INFO] Avviso countdown: {minutes_left} minuti...")
                 time.sleep(60)
 
                 players_online = get_players(rcon)
+                log_print(f"[INFO] Giocatori online: {players_online}")
+                discord_message_sync(f"Giocatori online: {players_online}", is_log=True)
                 if players_online == 0:
                     log_print("[INFO] Nessun giocatore online, skip countdown e riavvio subito.")
                     discord_message_sync("Nessun giocatore online, riavvio immediato.", is_log=True)
@@ -266,6 +268,69 @@ def handle_mods_update():
     log_print("[INFO] Fine procedura update mod (quit inviato).")
     discord_message_sync("Fine procedura update mod (quit inviato).")
 
+def monitor_loop():
+    current_log_file = None
+
+    while True:
+        search_path = os.path.join(LOGS_DIR, PATTERN)
+        files = glob.glob(search_path)
+        if not files:
+            log_print("[ERROR] Nessun file log trovato. Riprovo tra 10s...")
+            discord_message_sync("Nessun file di log trovato, riprovo tra 10s...")
+            time.sleep(10)
+            continue
+
+        # Se non stiamo già monitorando un file, selezioniamo il più recente
+        if current_log_file is None or not os.path.exists(current_log_file):
+            current_log_file = max(files, key=os.path.getmtime)
+            log_print(f"[INFO] Monitoro il file: {current_log_file}")
+            discord_message_sync(f"Monitoro il file di log: `{current_log_file}`")
+
+        for line in tail_f(current_log_file):
+            if line:
+                if "CheckModsNeedUpdate: Mods need update" in line:
+                # if "CheckModsNeedUpdate: Mods updated" in line:    # MODS UPDATED for DEBUG ONLY
+                    log_print("[ALERT] Trovato aggiornamento mod nel log!")
+                    discord_message_sync("**Mods updated rilevato nel log!** Procedo al riavvio.")
+                    handle_mods_update()
+
+                    log_print("[INFO] Attendo che il server si spenga...")
+                    discord_message_sync("Attendo che il server si spenga...", is_log=True)
+                    offline_ok = wait_for_server_offline_rcon(timeout=180, check_interval=5)
+                    if offline_ok:
+                        log_print("[INFO] Server offline confermato.")
+                        discord_message_sync("**Server offline confermato.**", is_log=True)
+                    else:
+                        log_print("[WARNING] Il server non è andato offline entro 180s.")
+                        discord_message_sync("**ATTENZIONE:** il server non si è spento entro 180s.")
+
+                    log_print("[INFO] Attendo che il server torni online...")
+                    discord_message_sync("Attendo che il server torni online...", is_log=True)
+                    online_ok = wait_for_server_online_rcon(timeout=300, check_interval=5)
+                    if online_ok:
+                        log_print("[INFO] Server online rilevato!")
+                        discord_message_sync("**Server di nuovo online!**", is_log=True)
+                    else:
+                        log_print("[WARNING] Il server non è tornato online entro 300s.")
+                        discord_message_sync("**ATTENZIONE:** il server non è tornato online entro 300s.")
+
+                    log_print("[INFO] Riavvio concluso. Ricerco eventuale nuovo file di log...")
+                    discord_message_sync("Riavvio concluso, ricerco un eventuale nuovo file di log.")
+                    break
+            else:
+                # Controllo periodico per un nuovo file di log
+                files = glob.glob(search_path)
+                # log_print(f"[DEBUG] Trovati {len(files)} file di log.")
+                latest_log_file = max(files, key=os.path.getmtime)
+                # log_print(f"[DEBUG] Ultimo file di log: {latest_log_file}")
+                if latest_log_file != current_log_file:
+                    log_print(f"[INFO] Trovato nuovo file di log: {latest_log_file}. Passo a monitorarlo.")
+                    discord_message_sync(f"Nuovo file di log rilevato: `{latest_log_file}`. Passo a monitorarlo.")
+                    current_log_file = latest_log_file
+                    break  # Esci dal ciclo per selezionare il nuovo file
+
+        time.sleep(2)
+
 def main():
     global logfile
     logfile = init_logging()
@@ -284,51 +349,9 @@ def main():
     else:
         log_print("[INFO] PZ Watchdog avviato (senza notifiche Discord).")
 
-    while True:
-        search_path = os.path.join(LOGS_DIR, PATTERN)
-        files = glob.glob(search_path)
-        if not files:
-            log_print("[ERROR] Nessun file log trovato. Riprovo tra 10s...")
-            discord_message_sync("Nessun file di log trovato, riprovo tra 10s...")
-            time.sleep(10)
-            continue
-
-        log_file = max(files, key=os.path.getmtime)
-        log_print(f"[INFO] Monitoro il file: {log_file}")
-        discord_message_sync(f"Monitoro il file di log: `{log_file}`")
-
-        for line in tail_f(log_file):
-            # if "CheckModsNeedUpdate: Mods need update" in line:
-            if "CheckModsNeedUpdate: Mods updated" in line:    # MODS UPDATED for DEBUG ONLY
-                log_print("[ALERT] Trovato aggiornamento mod nel log!")
-                discord_message_sync("**Mods updated rilevato nel log!** Procedo al riavvio.")
-                handle_mods_update()
-
-                log_print("[INFO] Attendo che il server si spenga...")
-                discord_message_sync("Attendo che il server si spenga...", is_log=True)
-                offline_ok = wait_for_server_offline_rcon(timeout=180, check_interval=5)
-                if offline_ok:
-                    log_print("[INFO] Server offline confermato.")
-                    discord_message_sync("**Server offline confermato.**", is_log=True)
-                else:
-                    log_print("[WARNING] Il server non è andato offline entro 180s.")
-                    discord_message_sync("**ATTENZIONE:** il server non si è spento entro 180s.")
-
-                log_print("[INFO] Attendo che il server torni online...")
-                discord_message_sync("Attendo che il server torni online...", is_log=True)
-                online_ok = wait_for_server_online_rcon(timeout=300, check_interval=5)
-                if online_ok:
-                    log_print("[INFO] Server online rilevato!")
-                    discord_message_sync("**Server di nuovo online!**", is_log=True)
-                else:
-                    log_print("[WARNING] Il server non è tornato online entro 300s.")
-                    discord_message_sync("**ATTENZIONE:** il server non è tornato online entro 300s.")
-
-                log_print("[INFO] Riavvio concluso. Ricerco eventuale nuovo file di log...")
-                discord_message_sync("Riavvio concluso, ricerco un eventuale nuovo file di log.")
-                break
-
-        time.sleep(2)
+    # Avvia il monitoraggio dei log
+    monitor_loop()
+    time.sleep(2)
 
 if __name__ == "__main__":
     main()
