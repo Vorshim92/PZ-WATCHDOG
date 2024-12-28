@@ -122,8 +122,9 @@ def ask_user_for_discord():
 
 def discord_message_sync(text, is_log=False):
     """
-    Se USE_DISCORD è True e abbiamo un webhook, invia il messaggio;
+    Se USE_DISCORD è True e abbiamo un webhook, invia il messaggio al channel Discord per notifiche stato Server;
     altrimenti esce subito.
+    se is_log=True, invia il messaggio anche al channel per i log.
     """
     if not USE_DISCORD:
         return  # Non fare nulla
@@ -268,10 +269,9 @@ def main():
     global logfile
     logfile = init_logging()
 
-    # Chiedi parametri RCON
-    ip, port, pwd = ask_user_for_params()
+    # Chiedi parametri RCON all'utente
     global SERVER_IP, RCON_PORT, RCON_PASSWORD
-    SERVER_IP, RCON_PORT, RCON_PASSWORD = ip, port, pwd
+    SERVER_IP, RCON_PORT, RCON_PASSWORD = ask_user_for_params()
 
     # Chiedi se abilitare Discord e, se sì, quale webhook
     ask_user_for_discord()
