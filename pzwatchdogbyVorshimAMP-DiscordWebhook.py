@@ -35,8 +35,8 @@ def init_logging():
     log_dir = "Logs/PZWatchdogLogs"
     os.makedirs(log_dir, exist_ok=True)
 
-    # Create a timestamp for the filename: e.g. '2023-12-25_11-03-00_PZWDLog.txt'
-    time_str = time.strftime("%Y-%m-%d_%H-%M-%S")
+    # Create a timestamp for the filename: e.g. '28-12-24_17-22-24_PZWDLog.txt'
+    time_str = time.strftime("%d-%m-%y_%H-%M-%S")
     filename = f"{time_str}_PZWDLog.txt"
     fullpath = os.path.join(log_dir, filename)
 
