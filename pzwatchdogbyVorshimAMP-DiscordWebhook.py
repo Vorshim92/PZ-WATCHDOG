@@ -130,20 +130,20 @@ def discord_message_sync(text, is_log=False):
         return  # Non fare nulla
 
     data = {"content": text}
-    if DISCORD_WEBHOOK_URL:
-        resp = requests.post(DISCORD_WEBHOOK_URL, json=data)
-        if resp.status_code == 204:
-            log_print("[DISCORD] Messaggio inviato con successo.")
-        else:
-            log_print(f"[DISCORD] Errore nell'invio, status={resp.status_code}, resp={resp.text}")
     
-    if is_log and DISCORD_LOGSWEBHOOK_URL:
+    if DISCORD_LOGSWEBHOOK_URL:
         resp = requests.post(DISCORD_LOGSWEBHOOK_URL, json=data)
         if resp.status_code == 204:
             log_print("[DISCORD] Messaggio di log inviato con successo.")
         else:
             log_print(f"[DISCORD] Errore nell'invio del log, status={resp.status_code}, resp={resp.text}")
 
+    if is_log and DISCORD_WEBHOOK_URL:
+        resp = requests.post(DISCORD_WEBHOOK_URL, json=data)
+        if resp.status_code == 204:
+            log_print("[DISCORD] Messaggio inviato con successo.")
+        else:
+            log_print(f"[DISCORD] Errore nell'invio, status={resp.status_code}, resp={resp.text}")
 
 def tail_f(log_file):
     """Legge in stile 'tail -f': parte dalla fine e yield-a ogni nuova riga."""
@@ -233,6 +233,7 @@ def handle_mods_update():
     try:
         players_online = get_players(rcon)
         log_print(f"[INFO] Giocatori online: {players_online}")
+        discord_message_sync(f"Giocatori online: {players_online}", is_log=True)
 
         if players_online > 0:
             minutes_left = 5
@@ -240,18 +241,18 @@ def handle_mods_update():
                 msg = f"RIAVVIO tra {minutes_left} minuti!"
                 broadcast_message(rcon, msg)
                 discord_message_sync(msg)
-                log_print(f"[INFO] Avviso countdown: {minutes_left} minuti...")
+                log_print(f"[INFO] Avviso countdown: {minutes_left} minuti...", is_log=True)
                 time.sleep(60)
 
                 players_online = get_players(rcon)
                 if players_online == 0:
                     log_print("[INFO] Nessun giocatore online, skip countdown e riavvio subito.")
-                    discord_message_sync("Nessun giocatore online, riavvio immediato.")
+                    discord_message_sync("Nessun giocatore online, riavvio immediato.", is_log=True)
                     break
                 minutes_left -= 1
 
         broadcast_message(rcon, "RIAVVIO tra 10 secondi!")
-        discord_message_sync("**RIAVVIO tra 10 secondi!**")
+        discord_message_sync("**RIAVVIO tra 10 secondi!**", is_log=True)
         time.sleep(10)
 
         log_print("[INFO] Invio comando 'quit' via RCON. AMP gestirà il riavvio.")
@@ -279,6 +280,7 @@ def main():
     # Se l'utente ha abilitato Discord
     if USE_DISCORD:
         discord_message_sync("**PZ Watchdog avviato.**")
+        log_print("[INFO] PZ Watchdog avviato (con notifiche Discord).")
     else:
         log_print("[INFO] PZ Watchdog avviato (senza notifiche Discord).")
 
@@ -296,28 +298,28 @@ def main():
         discord_message_sync(f"Monitoro il file di log: `{log_file}`")
 
         for line in tail_f(log_file):
-            if "CheckModsNeedUpdate: Mods need update" in line:
-            # if "CheckModsNeedUpdate: Mods updated" in line:    # MODS UPDATED for DEBUG ONLY
+            # if "CheckModsNeedUpdate: Mods need update" in line:
+            if "CheckModsNeedUpdate: Mods updated" in line:    # MODS UPDATED for DEBUG ONLY
                 log_print("[ALERT] Trovato aggiornamento mod nel log!")
                 discord_message_sync("**Mods updated rilevato nel log!** Procedo al riavvio.")
                 handle_mods_update()
 
                 log_print("[INFO] Attendo che il server si spenga...")
-                discord_message_sync("Attendo che il server si spenga...")
+                discord_message_sync("Attendo che il server si spenga...", is_log=True)
                 offline_ok = wait_for_server_offline_rcon(timeout=180, check_interval=5)
                 if offline_ok:
                     log_print("[INFO] Server offline confermato.")
-                    discord_message_sync("**Server offline confermato.**")
+                    discord_message_sync("**Server offline confermato.**", is_log=True)
                 else:
                     log_print("[WARNING] Il server non è andato offline entro 180s.")
                     discord_message_sync("**ATTENZIONE:** il server non si è spento entro 180s.")
 
                 log_print("[INFO] Attendo che il server torni online...")
-                discord_message_sync("Attendo che il server torni online...")
+                discord_message_sync("Attendo che il server torni online...", is_log=True)
                 online_ok = wait_for_server_online_rcon(timeout=300, check_interval=5)
                 if online_ok:
                     log_print("[INFO] Server online rilevato!")
-                    discord_message_sync("**Server di nuovo online!**")
+                    discord_message_sync("**Server di nuovo online!**", is_log=True)
                 else:
                     log_print("[WARNING] Il server non è tornato online entro 300s.")
                     discord_message_sync("**ATTENZIONE:** il server non è tornato online entro 300s.")
