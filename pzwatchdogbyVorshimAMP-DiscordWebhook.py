@@ -14,6 +14,8 @@ import threading
 # If the user decides NOT to use Discord, then USE_DISCORD=False
 
 IS_AMP = True
+CHECK_MODS_TIMER = 300
+
 USE_DISCORD = False
 DISCORD_LOGSWEBHOOK_URL = None
 DISCORD_WEBHOOK_URL = None
@@ -67,16 +69,25 @@ def ask_user_for_params():
     """
     Asks the user for the RCON IP, port, and password.
     If the user presses Enter, the default values are used.
-    Returns (ip, port, password, cooldown, is_amp).
+    Returns (ip, port, password, cooldown, default_amp, timer).
     """
     default_ip = "127.0.0.1"
     default_port = "27015"
     default_cooldown = 5
     default_amp = True
+    default_timer = 300
 
-    amp = input("Are you using AMP? (y/n): ").strip().lower()
+    amp = input("Are you using AMP Schedule for CheckModsNeedUpdate? (y/n): ").strip().lower()
     if amp in ["n", "no"]:
         default_amp = False
+        timer_str = input(f"Enter the timer for checking mods (in seconds, press Enter for '{default_timer}'): ")
+        if not timer_str.strip():
+            timer_str = str(default_timer)
+        try:
+            timer = int(timer_str)
+        except ValueError:
+            log_print(f"Invalid timer, using default {default_timer}.")
+            timer = default_timer
 
     ip = input(f"Enter the server IP (press Enter for '{default_ip}'): ")
     if not ip.strip():
@@ -106,7 +117,7 @@ def ask_user_for_params():
         log_print(f"Invalid cooldown, using default {default_cooldown}.")
         cooldown = default_cooldown
 
-    return ip, port, password, cooldown, default_amp
+    return ip, port, password, cooldown, default_amp, timer
 
 def ask_user_for_discord():
     """
@@ -306,6 +317,7 @@ def check_mods_update():
     """
     try:
         rcon.checkModsNeedUpdate()
+        log_print("[INFO] Checking for mod updates...", also_discord=True)
     except ConnectionRefusedError:
         log_print("[DEBUG] RCON: Connection refused, server offline")
         return False
@@ -321,15 +333,9 @@ def monitor_loop():
     waits for the server to restart.
     """
     current_log_file = None
-
-    def periodic_mod_check():
-        while True:
-            check_mods_update()
-            time.sleep(300)  # 5 minutes
-
-    # Only start periodic mod checks in a separate thread if we're not using AMP
     if not IS_AMP:
-        threading.Thread(target=periodic_mod_check, daemon=True).start()
+        log_print(f"[INFO] AMP Schedule is not used, will check for mod updates every {CHECK_MODS_TIMER/60} minute(s).", also_discord=True)
+        last_check_time = time.time()
 
     while True:
         search_path = os.path.join(LOGS_DIR, PATTERN)
@@ -347,7 +353,8 @@ def monitor_loop():
         for line in tail_f(current_log_file):
             if line:
                 # Example check for mod update lines
-                if "CheckModsNeedUpdate: Mods updated" in line:
+                if "CheckModsNeedUpdate: Mods need update" in line:
+                # if "CheckModsNeedUpdate: Mods updated" in line:    # "Mods updated" for DEBUG ONLY
                     log_print("[ALERT] Mod update found in the log!", also_discord=True)
                     handle_mods_update()
 
@@ -368,6 +375,11 @@ def monitor_loop():
                     log_print("[INFO] Restart completed. Searching for a new log file...", also_discord=True)
                     break
             else:
+                # Check if 60 seconds have passed since the last check if we're not using AMP
+                if not IS_AMP and time.time() - last_check_time > CHECK_MODS_TIMER:
+                    check_mods_update()
+                    last_check_time = time.time()
+
                 # Periodically check if a new log file has appeared
                 files = glob.glob(search_path)
                 latest_log_file = max(files, key=os.path.getmtime)
@@ -382,8 +394,8 @@ def main():
     global logfile
     logfile = init_logging()
 
-    global SERVER_IP, RCON_PORT, RCON_PASSWORD, COOLDOWN_RESTART, IS_AMP
-    SERVER_IP, RCON_PORT, RCON_PASSWORD, COOLDOWN_RESTART, IS_AMP = ask_user_for_params()
+    global SERVER_IP, RCON_PORT, RCON_PASSWORD, COOLDOWN_RESTART, IS_AMP, CHECK_MODS_TIMER
+    SERVER_IP, RCON_PORT, RCON_PASSWORD, COOLDOWN_RESTART, IS_AMP, CHECK_MODS_TIMER = ask_user_for_params()
 
     global rcon
     rcon = ZomboidRCON(ip=SERVER_IP, port=RCON_PORT, password=RCON_PASSWORD)
