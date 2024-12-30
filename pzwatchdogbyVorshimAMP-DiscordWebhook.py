@@ -6,76 +6,83 @@ import glob
 import re
 import requests
 from zomboid_rcon import ZomboidRCON
+import threading
 
 # For Discord webhook notification
 # DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/eccecc"
 # DISCORD_LOGSWEBHOOK_URL = "https://discord.com/api/webhooks/eccecc"
 # If the user decides NOT to use Discord, then USE_DISCORD=False
 
+IS_AMP = True
 USE_DISCORD = False
 DISCORD_LOGSWEBHOOK_URL = None
 DISCORD_WEBHOOK_URL = None
 
-# RCON parameters (will be set by ask_user_for_params if you want)
+# RCON parameters (will be set by ask_user_for_params)
 SERVER_IP = "127.0.0.1"
 RCON_PORT = 27015
 RCON_PASSWORD = "..."
+rcon = None
 
 COOLDOWN_RESTART = 5
 
 LOGS_DIR = "Logs"
 PATTERN = "*_DebugLog-server.txt"
 logfile = None
+
 def init_logging():
     """
     Creates the Logs/PZWatchdogLogs folder (if it doesn't exist)
-    and opens a log file with a timestamp in the name,
+    and opens a log file with a timestamp in the filename,
     returning the open stream.
     """
     log_dir = "Logs/PZWatchdogLogs"
     os.makedirs(log_dir, exist_ok=True)
 
-    # Create a timestamp for the filename: e.g. '28-12-24_17-22-24_PZWDLog.txt'
     time_str = time.strftime("%d-%m-%y_%H-%M-%S")
     filename = f"{time_str}_PZWDLog.txt"
     fullpath = os.path.join(log_dir, filename)
 
-    # Open the file in write mode
-    logfile = open(fullpath, "w", encoding="utf-8")
-    return logfile
+    lf = open(fullpath, "w", encoding="utf-8")
+    return lf
 
-def log_print(message, also_print=True):
+def log_print(message, also_print=True, also_discord=False, is_log=False):
     """
-    Prints and/or writes the message to the file.
-    - logfile: open stream in write mode
-    - message: string to log
-    - also_print: if True, also print to the screen, default is always True
+    Prints and/or writes the message to the log file.
+    If also_discord=True and USE_DISCORD=True, sends the message to Discord as well.
+    If is_log=True, it will also send the message to the main (server) webhook, if available.
     """
-    # Prepare a timestamp for the line
     time_str = time.strftime("[%Y-%m-%d %H:%M:%S]")
     line = f"{time_str} {message}"
 
     if also_print:
         print(line)
-    # Write the line to the file and flush
     logfile.write(line + "\n")
     logfile.flush()
+
+    if also_discord:
+        discord_message_sync(message, is_log)
 
 def ask_user_for_params():
     """
     Asks the user for the RCON IP, port, and password.
-    If the user presses enter, use default values.
-    Returns (ip, port, password).
+    If the user presses Enter, the default values are used.
+    Returns (ip, port, password, cooldown, is_amp).
     """
     default_ip = "127.0.0.1"
     default_port = "27015"
     default_cooldown = 5
+    default_amp = True
 
-    ip = input(f"Enter the server IP (press enter for '{default_ip}'): ")
+    amp = input("Are you using AMP? (y/n): ").strip().lower()
+    if amp in ["n", "no"]:
+        default_amp = False
+
+    ip = input(f"Enter the server IP (press Enter for '{default_ip}'): ")
     if not ip.strip():
         ip = default_ip
 
-    port_str = input(f"Enter the RCON port (press enter for '{default_port}'): ")
+    port_str = input(f"Enter the RCON port (press Enter for '{default_port}'): ")
     if not port_str.strip():
         port_str = default_port
     try:
@@ -90,41 +97,40 @@ def ask_user_for_params():
         if not password.strip():
             log_print("Password cannot be empty.")
 
-    cooldown_str = input(f"Enter the cooldown time (in minutes) before restarting (press enter for '{default_cooldown}'): ")
+    cooldown_str = input(f"Enter the cooldown time (in minutes) before restarting (press Enter for '{default_cooldown}'): ")
     if not cooldown_str.strip():
-        cooldown_str = default_cooldown
+        cooldown_str = str(default_cooldown)
     try:
         cooldown = int(cooldown_str)
     except ValueError:
         log_print(f"Invalid cooldown, using default {default_cooldown}.")
-        cooldown = int(default_cooldown)
+        cooldown = default_cooldown
 
-    return ip, port, password, cooldown
+    return ip, port, password, cooldown, default_amp
 
 def ask_user_for_discord():
     """
-    Asks the user if they want to enable Discord.
-    If yes, asks for the webhook URLs for the server and logs.
-    If no, sets USE_DISCORD=False.
+    Asks the user if they want to enable Discord notifications.
+    If yes, asks for the webhook URLs (server and logs).
     """
     global USE_DISCORD, DISCORD_WEBHOOK_URL, DISCORD_LOGSWEBHOOK_URL
 
-    choice = input("Do you want to enable Discord notifications? (y/n): ").lower().strip()
+    choice = input("Do you want to enable Discord notifications? (y/n): ").strip().lower()
     if choice in ["y", "yes"]:
-        logchoice = input("Do you want to enable Discord log notifications? (y/n): ").lower().strip()
+        logchoice = input("Do you want to enable Discord log notifications? (y/n): ").strip().lower()
         if logchoice in ["y", "yes"]:
             logwebhook = input("Enter your Discord webhook URL for logs: ").strip()
             if logwebhook:
                 DISCORD_LOGSWEBHOOK_URL = logwebhook
             else:
-                log_print("No webhook entered, disabling Discord log notifications.")
-        
+                log_print("No log webhook entered, disabling Discord log notifications.")
+
         webhook = input("Enter your Discord webhook URL for server notifications: ").strip()
         if webhook:
             DISCORD_WEBHOOK_URL = webhook
         else:
-            log_print("No webhook entered, disabling Discord server notifications.")
-        
+            log_print("No server webhook entered, disabling Discord server notifications.")
+
         if DISCORD_LOGSWEBHOOK_URL or DISCORD_WEBHOOK_URL:
             log_print("Discord notifications enabled.")
             USE_DISCORD = True
@@ -134,29 +140,35 @@ def ask_user_for_discord():
 
 def discord_message_sync(text, is_log=False):
     """
-    If USE_DISCORD is True and we have a webhook, sends the message to the Discord channel for server status notifications;
-    otherwise, exits immediately.
-    if is_log=True, sends the message also to the log channel.
+    If USE_DISCORD=True, sends the text to Discord.
+    If is_log=True, also sends to the main server webhook (if configured),
+    otherwise only to the log webhook.
+    Adjust as needed for your own webhook logic.
     """
     if not USE_DISCORD:
-        return  # Do nothing
+        return
 
     data = {"content": text}
-    
+
+    # Send to the logs webhook if available
     if DISCORD_LOGSWEBHOOK_URL:
         resp = requests.post(DISCORD_LOGSWEBHOOK_URL, json=data)
-        if not resp.status_code == 204:
-            log_print(f"[DISCORD] Error sending log, status={resp.status_code}, resp={resp.text}")
+        if resp.status_code != 204:
+            log_print(f"[DISCORD] Error sending to log webhook, status={resp.status_code}, resp={resp.text}")
 
+    # If is_log=True, also send to the main server webhook if available
     if is_log and DISCORD_WEBHOOK_URL:
         resp = requests.post(DISCORD_WEBHOOK_URL, json=data)
-        if not resp.status_code == 204:
-            log_print(f"[DISCORD] Error sending, status={resp.status_code}, resp={resp.text}")
+        if resp.status_code != 204:
+            log_print(f"[DISCORD] Error sending to server webhook, status={resp.status_code}, resp={resp.text}")
 
 def tail_f(log_file, timeout=1.0):
-    """Reads in 'tail -f' style: starts from the end and yields each new line with a timeout."""
+    """
+    Reads lines from the log file in a 'tail -f' style: 
+    starts at the end and yields each new line with a timeout.
+    """
     try:
-        with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             f.seek(0, os.SEEK_END)
             while True:
                 line = f.readline()
@@ -166,31 +178,46 @@ def tail_f(log_file, timeout=1.0):
                     time.sleep(timeout)
                     yield None
     except Exception as e:
-        log_print(f"[ERROR] Error in tail_f function: {e}")
+        log_print(f"[ERROR] Error in tail_f: {e}", also_discord=True)
 
-def get_players(rcon_client):
-    """Returns the number of connected players, extracting from the 'players' response."""
-    resp = rcon_client.command("players")
-    text_output = resp.response  # the actual string
-    match = re.search(r'\((\d+)\)', text_output)
-    if match:
-        return int(match.group(1))
-    return 0
+def get_players():
+    """
+    Returns the number of connected players, extracted from the 'players' RCON response.
+    """
+    try:
+        resp = rcon.players()
+        text_output = resp.response
+        match = re.search(r"\((\d+)\)", text_output)
+        if match:
+            return int(match.group(1))
+        return 0
+    except ConnectionRefusedError:
+        log_print("[DEBUG] RCON: Connection refused, server offline")
+        return False
+    except Exception as e:
+        log_print(("[DEBUG] Other RCON error:", e))
+        return False
 
-def broadcast_message(rcon_client, message):
-    """Sends a global in-game message with 'servermsg'."""
-    cmd = f'servermsg "{message}"'
-    rcon_client.command(cmd)
+def broadcast_message(message):
+    """
+    Sends a global in-game message via 'servermsg' using RCON.
+    """
+    try:
+        rcon.servermsg(message)
+    except ConnectionRefusedError:
+        log_print("[DEBUG] RCON: Connection refused, server offline")
+        return False
+    except Exception as e:
+        log_print(("[DEBUG] Other RCON error:", e))
+        return False
 
 def is_server_online_rcon():
     """
-    Returns True if the RCON response contains "Players connected",
-    False if the response contains "Connection refused" or if there is an exception.
-    (You can customize based on your use cases.)
+    Returns True if the RCON response contains "Players connected".
+    Returns False if the response indicates "Connection refused" or if an exception occurs.
     """
     try:
-        rcon = ZomboidRCON(ip=SERVER_IP, port=RCON_PORT, password=RCON_PASSWORD)
-        resp = rcon.command("players")
+        resp = rcon.players()
         text = resp.response
 
         log_print(f"[DEBUG] RCON response: {repr(text)}")
@@ -200,26 +227,22 @@ def is_server_online_rcon():
         if "Connection refused" in text:
             return False
 
-        # Any other unexpected string => consider offline (or decide yourself)
         return False
-
     except ConnectionRefusedError:
         log_print("[DEBUG] RCON: Connection refused, server offline")
         return False
     except Exception as e:
-        log_print("[DEBUG] Other RCON error:", e)
+        log_print(("[DEBUG] Other RCON error:", e))
         return False
 
 def wait_for_server_offline_rcon(timeout=180, check_interval=5):
     """
-    Checks every 'check_interval' seconds if the server is online via RCON.
-    As soon as is_server_online_rcon() returns False => OFFLINE => return True.
-    If 'timeout' seconds pass and it never goes offline => return False.
+    Checks every 'check_interval' seconds if the server is offline via RCON.
+    Returns True as soon as it's offline, or False if 'timeout' is exceeded.
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
         if not is_server_online_rcon():
-            # means server_online = False => server offline
             return True
         time.sleep(check_interval)
     return False
@@ -227,8 +250,7 @@ def wait_for_server_offline_rcon(timeout=180, check_interval=5):
 def wait_for_server_online_rcon(timeout=300, check_interval=5):
     """
     Checks every 'check_interval' seconds if the server is online via RCON.
-    As soon as is_server_online_rcon() returns True => ONLINE => return True.
-    If 'timeout' seconds pass and it never goes online => return False.
+    Returns True as soon as it's online, or False if 'timeout' is exceeded.
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -238,107 +260,121 @@ def wait_for_server_online_rcon(timeout=300, check_interval=5):
     return False
 
 def handle_mods_update():
+    """
+    Handles the mod update event by warning players, counting down, 
+    and sending the 'quit' command to RCON so that AMP (if used) restarts the server.
+    """
     minutes_left = COOLDOWN_RESTART
-    log_print("[INFO] Mod update found. Starting restart procedure...")
-    discord_message_sync(f"**Mod update detected!** Starting restart procedure in: {minutes_left}", is_log=True)
-    rcon = ZomboidRCON(ip=SERVER_IP, port=RCON_PORT, password=RCON_PASSWORD)
+    log_print(
+        f"[INFO] Mod update detected! Starting restart procedure in: {minutes_left} minute(s).",
+        also_discord=True,
+        is_log=True
+    )
     try:
-        players_online = get_players(rcon)
-        log_print(f"[INFO] Players online: {players_online}")
-        discord_message_sync(f"Players online: {players_online}")
+        players_online = get_players()
+        log_print(f"[INFO] Players online: {players_online}", also_discord=True)
 
         if players_online > 0:
             while minutes_left > 0:
-                msg = f"RESTART in {minutes_left} minutes!"
-                broadcast_message(rcon, msg)
-                discord_message_sync(msg)
-                log_print(f"[INFO] Countdown warning: {minutes_left} minutes...")
+                msg = f"RESTART in {minutes_left} minute(s)!"
+                broadcast_message(msg)
+                log_print(msg, also_discord=True)
                 time.sleep(60)
 
-                players_online = get_players(rcon)
-                log_print(f"[INFO] Players online: {players_online}")
-                discord_message_sync(f"Players online: {players_online}")
+                players_online = get_players()
+                log_print(f"[INFO] Players online: {players_online}", also_discord=True)
                 if players_online == 0:
-                    log_print("[INFO] No players online, skipping countdown and restarting immediately.")
-                    discord_message_sync("No players online, restarting immediately.")
+                    log_print("[INFO] No players online, skipping countdown and restarting immediately.", also_discord=True)
                     break
                 minutes_left -= 1
 
-        broadcast_message(rcon, "RESTART in 10 seconds!")
-        discord_message_sync("**RESTART in 10 seconds!**")
+        broadcast_message("RESTART in 10 seconds!")
+        log_print("RESTART in 10 seconds!", also_discord=True)
         time.sleep(10)
 
-        log_print("[INFO] Sending 'quit' command via RCON. AMP will handle the restart.")
-        discord_message_sync("Sending 'quit' command via RCON. Waiting for the restart...")
-        rcon.command("quit")
-
+        log_print("[INFO] Sending 'quit' command via RCON. AMP will handle the restart.", also_discord=True)
+        rcon.quit()
     except Exception as e:
-        log_print(f"[ERROR] Error in handle_mods_update: {e}")
-        discord_message_sync(f"**Error in handle_mods_update:** {e}")
+        log_print(f"[ERROR] Error in handle_mods_update: {e}", also_discord=True)
 
-    log_print("[INFO] End of mod update procedure (quit sent).")
-    discord_message_sync("End of mod update procedure (quit sent).")
+    log_print("[INFO] End of mod update procedure (quit sent).", also_discord=True)
+
+def check_mods_update():
+    """
+    If IS_AMP is False, call RCON's checkModsNeedUpdate 
+    (depending on how your server logic is set up).
+    """
+    try:
+        rcon.checkModsNeedUpdate()
+    except ConnectionRefusedError:
+        log_print("[DEBUG] RCON: Connection refused, server offline")
+        return False
+    except Exception as e:
+        log_print(("[DEBUG] Other RCON error:", e))
+        return False
 
 def monitor_loop():
+    """
+    Main monitoring loop: selects the latest server log file, tails it,
+    and looks for lines that indicate a mod update. 
+    When a mod update is detected, calls handle_mods_update and 
+    waits for the server to restart.
+    """
     current_log_file = None
+
+    def periodic_mod_check():
+        while True:
+            check_mods_update()
+            time.sleep(300)  # 5 minutes
+
+    # Only start periodic mod checks in a separate thread if we're not using AMP
+    if not IS_AMP:
+        threading.Thread(target=periodic_mod_check, daemon=True).start()
 
     while True:
         search_path = os.path.join(LOGS_DIR, PATTERN)
         files = glob.glob(search_path)
         if not files:
-            log_print("[ERROR] No log file found. Retrying in 10s...")
-            discord_message_sync("No log file found, retrying in 10s...")
+            log_print("[ERROR] No log file found. Retrying in 10 seconds...", also_discord=True)
             time.sleep(10)
             continue
 
-        # If we are not already monitoring a file, select the most recent one
+        # If we're not currently monitoring a file, or that file doesn't exist, pick the newest
         if current_log_file is None or not os.path.exists(current_log_file):
             current_log_file = max(files, key=os.path.getmtime)
-            log_print(f"[INFO] Monitoring file: {current_log_file}")
-            discord_message_sync(f"Monitoring log file: `{current_log_file}`")
+            log_print(f"[INFO] Monitoring file: {current_log_file}", also_discord=True)
 
         for line in tail_f(current_log_file):
             if line:
-                if "CheckModsNeedUpdate: Mods need update" in line:
-                # if "CheckModsNeedUpdate: Mods updated" in line:    # MODS UPDATED for DEBUG ONLY
-                    log_print("[ALERT] Mod update found in log!")
-                    discord_message_sync("**Mods updated detected in log!** Proceeding with restart.")
+                # Example check for mod update lines
+                if "CheckModsNeedUpdate: Mods updated" in line:
+                    log_print("[ALERT] Mod update found in the log!", also_discord=True)
                     handle_mods_update()
 
-                    log_print("[INFO] Waiting for the server to shut down...")
-                    discord_message_sync("Waiting for the server to shut down...")
+                    log_print("[INFO] Waiting for the server to shut down...", also_discord=True)
                     offline_ok = wait_for_server_offline_rcon(timeout=180, check_interval=5)
                     if offline_ok:
-                        log_print("[INFO] Server offline confirmed.")
-                        discord_message_sync("**Server offline confirmed.**", is_log=True)
+                        log_print("[INFO] Server offline confirmed.", also_discord=True, is_log=True)
                     else:
-                        log_print("[WARNING] The server did not go offline within 180s.")
-                        discord_message_sync("**WARNING:** the server did not shut down within 180s.")
+                        log_print("[WARNING] The server did not go offline within 180 seconds.", also_discord=True)
 
-                    log_print("[INFO] Waiting for the server to come back online...")
-                    discord_message_sync("Waiting for the server to come back online...")
+                    log_print("[INFO] Waiting for the server to come back online...", also_discord=True)
                     online_ok = wait_for_server_online_rcon(timeout=300, check_interval=5)
                     if online_ok:
-                        log_print("[INFO] Server online detected!")
-                        discord_message_sync("**Server back online!**", is_log=True)
+                        log_print("[INFO] Server online detected!", also_discord=True, is_log=True)
                     else:
-                        log_print("[WARNING] The server did not come back online within 300s.")
-                        discord_message_sync("**WARNING:** the server did not come back online within 300s.")
+                        log_print("[WARNING] The server did not come back online within 300 seconds.", also_discord=True)
 
-                    log_print("[INFO] Restart completed. Searching for a new log file...")
-                    discord_message_sync("Restart completed, searching for a new log file.")
+                    log_print("[INFO] Restart completed. Searching for a new log file...", also_discord=True)
                     break
             else:
-                # Periodic check for a new log file
+                # Periodically check if a new log file has appeared
                 files = glob.glob(search_path)
-                # log_print(f"[DEBUG] Found {len(files)} log files.")
                 latest_log_file = max(files, key=os.path.getmtime)
-                # log_print(f"[DEBUG] Latest log file: {latest_log_file}")
                 if latest_log_file != current_log_file:
-                    log_print(f"[INFO] New log file found: {latest_log_file}. Switching to monitor it.")
-                    discord_message_sync(f"New log file detected: `{latest_log_file}`. Switching to monitor it.")
+                    log_print(f"[INFO] New log file detected: {latest_log_file}. Switching to monitor it.", also_discord=True)
                     current_log_file = latest_log_file
-                    break  # Exit the loop to select the new file
+                    break
 
         time.sleep(2)
 
@@ -346,21 +382,19 @@ def main():
     global logfile
     logfile = init_logging()
 
-    # Ask the user for RCON parameters
-    global SERVER_IP, RCON_PORT, RCON_PASSWORD, COOLDOWN_RESTART
-    SERVER_IP, RCON_PORT, RCON_PASSWORD, COOLDOWN_RESTART = ask_user_for_params()
+    global SERVER_IP, RCON_PORT, RCON_PASSWORD, COOLDOWN_RESTART, IS_AMP
+    SERVER_IP, RCON_PORT, RCON_PASSWORD, COOLDOWN_RESTART, IS_AMP = ask_user_for_params()
 
-    # Ask if they want to enable Discord and, if so, which webhook
+    global rcon
+    rcon = ZomboidRCON(ip=SERVER_IP, port=RCON_PORT, password=RCON_PASSWORD)
+
     ask_user_for_discord()
 
-    # If the user has enabled Discord
     if USE_DISCORD:
-        discord_message_sync("**PZ Watchdog started.**")
-        log_print("[INFO] PZ Watchdog started (with Discord notifications).")
+        log_print("PZ Watchdog started (with Discord notifications).", also_discord=True)
     else:
-        log_print("[INFO] PZ Watchdog started (without Discord notifications).")
+        log_print("PZ Watchdog started (without Discord notifications).")
 
-    # Start monitoring the logs
     monitor_loop()
     time.sleep(2)
 
