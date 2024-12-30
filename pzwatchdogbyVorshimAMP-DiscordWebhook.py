@@ -6,7 +6,6 @@ import glob
 import re
 import requests
 from zomboid_rcon import ZomboidRCON
-import threading
 
 # For Discord webhook notification
 # DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/eccecc"
@@ -84,10 +83,10 @@ def ask_user_for_params():
         if not timer_str.strip():
             timer_str = str(default_timer)
         try:
-            timer = int(timer_str)
+            default_timer = int(timer_str)
         except ValueError:
             log_print(f"Invalid timer, using default {default_timer}.")
-            timer = default_timer
+            default_timer = 300
 
     ip = input(f"Enter the server IP (press Enter for '{default_ip}'): ")
     if not ip.strip():
@@ -117,7 +116,7 @@ def ask_user_for_params():
         log_print(f"Invalid cooldown, using default {default_cooldown}.")
         cooldown = default_cooldown
 
-    return ip, port, password, cooldown, default_amp, timer
+    return ip, port, password, cooldown, default_amp, default_timer
 
 def ask_user_for_discord():
     """
